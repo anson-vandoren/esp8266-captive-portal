@@ -1,8 +1,11 @@
 import network
 import usocket as socket
 import uselect as select
+import uerrno
 import ubinascii as binascii
 import utime as time
+import uio
+import gc
 
 LOCAL_IP = "192.168.4.1"
 
@@ -69,8 +72,7 @@ class DNSQuery:
 class Server:
     def __init__(self, poller, port, sock_type, name):
         self.sock = socket.socket(socket.AF_INET, sock_type)
-        self.poller = poller
-        self.poller.register(self.sock, select.POLLIN | select.POLLOUT)
+        poller.register(self.sock, select.POLLIN | select.POLLOUT)
         self.port = port
         self.name = name
         self.listen()
@@ -80,21 +82,9 @@ class Server:
         self.sock.bind(addr)
         print(self.name, "listening on", addr)
 
-    def poll(self):
-        # check if there is an incoming connection on this socket
-        response = self.poller.poll(500)
-        if not response:
-            print("no response for", self.name)
-            return
-        response = response[0]
-        sock, event, *others = response
-        if sock != self.sock:
-            return
-        self.handle(sock, event, others)
-
-    def stop(self):
-        self.poller.unregister(self.sock)
+    def stop(self, poller):
         self.sock.close()
+        poller.unregister(self.sock)
         print(self.name, "stopped")
 
 
@@ -102,44 +92,119 @@ class DNSServer(Server):
     def __init__(self, poller, ip_addr):
         super().__init__(poller, 53, socket.SOCK_DGRAM, "DNS Server")
         self.ip_addr = ip_addr
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def handle(self, sock, event, others):
+        if sock is not self.sock:
+            return
         try:
+            sock.settimeout(1)
+            start = time.ticks_ms()
             data, sender = sock.recvfrom(1024)
+            diff = time.ticks_diff(time.ticks_ms(), start)
+            print("DNS receipt took:", diff, "got:", data)
             request = DNSQuery(data)
-            # check if this is a connectivity check and respond with our own IP
+            print("Sending {:s} -> {:s}".format(request.domain, self.ip_addr))
             sock.sendto(request.answer(self.ip_addr), sender)
-            if any(word in request.domain for word in CONN_CHECKS):
-                sock.sendto(request.answer(self.ip_addr), sender)
-                print("Replying: {:s} -> {:s}".format(request.domain, self.ip_addr))
-            else:
-                sock.sendto(request.answer(self.ip_addr), sender)
-                print("Not replying to:", request.domain)
         except Exception as e:
-            print("DNS server exception:", e)
+            if e.args[0] != uerrno.ETIMEDOUT:
+                print("DNS server exception:", e)
 
 
 class HTTPServer(Server):
     def __init__(self, poller):
         super().__init__(poller, 80, socket.SOCK_STREAM, "HTTP Server")
+        poller.modify(self.sock, select.POLLIN)
+        self.poller = poller
+        self.routes = dict()
+        self.request = dict()
+        self.conns = dict()
 
     def listen(self):
         super().listen()
-        print("http listening")
-        self.sock.listen(1)
+        self.sock.listen(5)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setblocking(False)
+
+    def accept(self, s):
+        sock, addr = s.accept()
+        print("Accepted connection from:", addr)
+        sock.setblocking(False)
+        self.poller.register(sock, select.POLLIN)
+
+    def routefile(self, path, file):
+        self.routes[path.encode()] = file.encode()
+
+    def read(self, s):
+        r = s.read()
+        if r:
+            self.request[id(s)] = self.request.get(id(s), b"") + r
+            if r[-4:] == b"\r\n\r\n":
+                req = self.request.pop(id(s))
+                get = req.split(b" ", 2)[1].split(b"?", 1)
+                path = get[0]
+                print("requested path:", path)
+                serve = self.routes.get(path)
+                headers = b"HTTP/1.1 200 OK\r\n"
+                if type(serve) is bytes:
+                    if serve[-3:] == b".gz":
+                        headers += b"Content-Encoding: gzip\r\n"
+                    body = open(serve, "rb")
+                elif callable(serve):
+                    body = uio.BytesIO(serve(*get[1:]) or b"")
+                else:
+                    headers = b"HTTP/1.1 404 Not Found\r\n"
+                    body = uio.BytesIO(b"")
+                headers += "\r\n"
+                buf = bytearray(headers + "\x00" * (536 - len(headers)))
+                bufmv = memoryview(buf)
+                bw = body.readinto(bufmv[len(headers) :], 536 - len(headers))
+                c = (body, buf, bufmv, [0, len(headers) + bw])
+                self.conns[id(s)] = c
+                self.poller.modify(s, select.POLLOUT)
+        else:
+            self.close(s)
+
+    def bufferfile(self, c, w):
+        if w == c[3][1] - c[3][0]:
+            c[3][0] = 0
+            c[3][1] = c[0].readinto(c[1], 536)
+        else:
+            c[3][0] += w
+
+    def close(self, s):
+        s.close()
+        self.poller.unregister(s)
+        sid = id(s)
+        if sid in self.request:
+            del self.request[id(s)]
+        if sid in self.conns:
+            del self.conns[id(s)]
+        gc.collect()
 
     def handle(self, sock, event, others):
         print("handling HTTP")
-        try:
-            data, addr = sock.recvfrom(1024)
-            print("HTTP Socket connected to:", addr, "and got data", data)
-            self.sock.send(
-                "<html><head><title>test</title></head><body>testtesttest</body></html>"
-            )
-            print("done sending HTTP")
-        except Exception as e:
-            print("HTTP server exception:", str(e))
+        if sock is self.sock:
+            print("HTTP accepting connection")
+            self.accept(sock)
+        elif event & select.POLLOUT:
+            print("HTTP sending outgoing")
+            c = self.conns[id(sock)]
+            if c is None:
+                print("failed to find outgoing socket")
+                return False
+            if c:
+                w = sock.write(c[2][c[3][0] : c[3][1]])
+                if not w or c[3][1] < 536:
+                    self.close(sock)
+                else:
+                    bufferfile(c, w)
+        elif event & select.POLLIN:
+            print("HTTP reading incoming")
+            self.read(sock)
+
         print("done handling HTTP")
+        return True
 
 
 def configure_wan():
@@ -162,15 +227,24 @@ def captive_portal():
     poller = select.poll()
 
     http_server = HTTPServer(poller)
+    http_server.routefile("/", "./index.html")
+    http_server.routefile("/generate_204", "./index.html")
     dns_server = DNSServer(poller, LOCAL_IP)
     try:
         while True:
-            http_server.poll()
-            dns_server.poll()
+            responses = poller.poll(100)
+            for response in responses:
+                sock, event, *others = response
+                if sock is dns_server.sock:
+                    print("processing with DNS")
+                    dns_server.handle(sock, event, others)
+                else:
+                    print("processing with HTTP")
+                    http_server.handle(sock, event, others)
     except KeyboardInterrupt:
         print("Captive portal stopped")
-        http_server.stop()
-        dns_server.stop()
+        http_server.stop(poller)
+        dns_server.stop(poller)
 
 
 configure_wan()
