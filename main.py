@@ -72,7 +72,7 @@ class DNSQuery:
 class Server:
     def __init__(self, poller, port, sock_type, name):
         self.sock = socket.socket(socket.AF_INET, sock_type)
-        poller.register(self.sock, select.POLLIN | select.POLLOUT)
+        poller.register(self.sock, select.POLLIN)
         self.port = port
         self.name = name
         self.listen()
@@ -92,17 +92,20 @@ class DNSServer(Server):
     def __init__(self, poller, ip_addr):
         super().__init__(poller, 53, socket.SOCK_DGRAM, "DNS Server")
         self.ip_addr = ip_addr
+        self.sock.settimeout(1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def handle(self, sock, event, others):
         if sock is not self.sock:
             return
+        print("Socket:", sock, "event", event)
         try:
-            sock.settimeout(1)
             start = time.ticks_ms()
             data, sender = sock.recvfrom(1024)
+            if not data:
+                return
             diff = time.ticks_diff(time.ticks_ms(), start)
-            print("DNS receipt took:", diff, "got:", data)
+            print("DNS receipt took:", diff)
             request = DNSQuery(data)
             print("Sending {:s} -> {:s}".format(request.domain, self.ip_addr))
             sock.sendto(request.answer(self.ip_addr), sender)
@@ -233,14 +236,19 @@ def captive_portal():
     try:
         while True:
             responses = poller.poll(100)
+            if not responses:
+                continue
             for response in responses:
                 sock, event, *others = response
+                if event == select.POLLHUP:
+                    continue
+                print("Response", response)
                 if sock is dns_server.sock:
-                    print("processing with DNS")
                     dns_server.handle(sock, event, others)
                 else:
                     print("processing with HTTP")
                     http_server.handle(sock, event, others)
+            gc.collect()
     except KeyboardInterrupt:
         print("Captive portal stopped")
         http_server.stop(poller)
