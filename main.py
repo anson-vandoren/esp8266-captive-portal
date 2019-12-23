@@ -6,7 +6,9 @@ import utime as time
 
 LOCAL_IP = "192.168.4.1"
 
+# https://success.tanaza.com/s/article/How-Automatic-Detection-of-Captive-Portal-works
 CONN_CHECKS = [
+    "akamai",
     "gstatic",
     "ncsi",
     "msftconnecttest",
@@ -24,8 +26,10 @@ class DNSQuery:
     def __init__(self, data):
         self.data = data
         self.domain = ""
-        head = 12  # header is bytes 0-11, so question starts on byte 12
-        length = data[head]  # length of this label defined in first byte
+        # header is bytes 0-11, so question starts on byte 12
+        head = 12
+        # length of this label defined in first byte
+        length = data[head]
         while length != 0:
             label = head + 1
             # add the label to the requested domain and insert a dot after
@@ -62,40 +66,75 @@ class DNSQuery:
         return packet
 
 
-class DNSServer:
-    def __init__(self, ip_addr):
-        self.ip_addr = ip_addr
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.poller = select.poll()
-        self.poller.register(self.udp_sock, select.POLLIN)
+class Server:
+    def __init__(self, poller, port, sock_type, name):
+        self.sock = socket.socket(socket.AF_INET, sock_type)
+        self.poller = poller
+        self.poller.register(self.sock, select.POLLIN)
+        self.port = port
+        self.name = name
+        self.listen()
 
     def listen(self):
-        self.udp_sock.bind(("0.0.0.0", 53))
-        self.udp_sock.setsockopt(socket.SOL_SOCKET, 20, self.handler)
-        try:
-            while True:
-                self.poll()
-                time.sleep(1)
-        except KeyboardInterrupt as e:
-            print("DNSServer stopped:", str(e))
-            self.udp_sock.close()
+        addr = socket.getaddrinfo("0.0.0.0", self.port)[0][-1]
+        self.sock.bind(addr)
+        self.sock.listen(1)
+        print(self.name, "listening on", addr)
 
     def poll(self):
-        ready = self.poller.poll(100)
-        try:
-            data, sender = self.udp_sock.recvfrom(1024)
-            p = DNSQuery(data)
-            # check if this is a connectivity check and respond with our own IP
-            if any(word in p.domain for word in CONN_CHECKS):
-                self.udp_sock.sendto(p.answer(self.ip_addr), sender)
-                print("Replying: {:s} -> {:s}".format(p.domain, self.ip_addr))
-            else:
-                print("Not replying to:", p.domain)
-        except Exception as e:
-            print("Exception:", str(e), e)
+        # check if there is an incoming connection on this socket
+        response = self.poller.poll(100)
+        if not response:
+            print("no response for", self.name)
+            return
+        response = response[0]
+        sock, event, *others = response
+        if sock != self.sock:
+            return
+        self.handle(sock, event, others)
 
-    def handler(self, sock):
-        print("handler from", sock)
+    def stop(self):
+        self.poller.unregister(self.sock)
+        self.sock.close()
+        print(self.name, "stopped")
+
+
+class DNSServer(Server):
+    def __init__(self, poller, ip_addr):
+        super().__init__(poller, 53, socket.SOCK_DGRAM, "DNS Server")
+        self.ip_addr = ip_addr
+
+    def handle(self, sock, event, others):
+        print("DNS Server socket", sock, "event", event, "others", others)
+        try:
+            data, sender = sock.recvfrom(1024)
+            print("data", data, "sender", sender)
+            request = DNSQuery(data)
+            # check if this is a connectivity check and respond with our own IP
+            if any(word in request.domain for word in CONN_CHECKS):
+                sock.sendto(request.answer(self.ip_addr), sender)
+                print("Replying: {:s} -> {:s}".format(request.domain, self.ip_addr))
+            else:
+                print("Not replying to:", request.domain)
+        except Exception as e:
+            print("DNS server exception:", e)
+
+
+class HTTPServer(Server):
+    def __init__(self, poller):
+        super().__init__(poller, 80, socket.SOCK_STREAM, "HTTP Server")
+
+    def handle(self, sock, event, others):
+        if event == select.POLLIN:
+            try:
+                conn, addr = sock.accept()
+                print("HTTP Socket:", conn, "connected to:", addr)
+                conn.send(
+                    "<html><head><title>test</title></head><body>testtesttest</body></html>"
+                )
+                conn.close()
+            except Exception as e:
+                print("HTTP server exception:", str(e))
 
 
 def configure_wan():
@@ -114,8 +153,21 @@ def configure_wan():
 
 
 def captive_portal():
-    dns_server = DNSServer(LOCAL_IP)
-    dns_server.listen()
+    # create a poller for both DNS and HTTP sockets
+    poller = select.poll()
+
+    http_server = HTTPServer(poller)
+    dns_server = DNSServer(poller, LOCAL_IP)
+    try:
+        while True:
+            http_server.poll()
+            time.sleep(0.1)
+            dns_server.poll()
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("Captive portal stopped")
+        http_server.stop()
+        dns_server.stop()
 
 
 configure_wan()
