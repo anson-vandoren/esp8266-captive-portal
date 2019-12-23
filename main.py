@@ -70,7 +70,7 @@ class Server:
     def __init__(self, poller, port, sock_type, name):
         self.sock = socket.socket(socket.AF_INET, sock_type)
         self.poller = poller
-        self.poller.register(self.sock, select.POLLIN)
+        self.poller.register(self.sock, select.POLLIN | select.POLLOUT)
         self.port = port
         self.name = name
         self.listen()
@@ -78,12 +78,11 @@ class Server:
     def listen(self):
         addr = socket.getaddrinfo("0.0.0.0", self.port)[0][-1]
         self.sock.bind(addr)
-        self.sock.listen(1)
         print(self.name, "listening on", addr)
 
     def poll(self):
         # check if there is an incoming connection on this socket
-        response = self.poller.poll(100)
+        response = self.poller.poll(500)
         if not response:
             print("no response for", self.name)
             return
@@ -105,16 +104,16 @@ class DNSServer(Server):
         self.ip_addr = ip_addr
 
     def handle(self, sock, event, others):
-        print("DNS Server socket", sock, "event", event, "others", others)
         try:
             data, sender = sock.recvfrom(1024)
-            print("data", data, "sender", sender)
             request = DNSQuery(data)
             # check if this is a connectivity check and respond with our own IP
+            sock.sendto(request.answer(self.ip_addr), sender)
             if any(word in request.domain for word in CONN_CHECKS):
                 sock.sendto(request.answer(self.ip_addr), sender)
                 print("Replying: {:s} -> {:s}".format(request.domain, self.ip_addr))
             else:
+                sock.sendto(request.answer(self.ip_addr), sender)
                 print("Not replying to:", request.domain)
         except Exception as e:
             print("DNS server exception:", e)
@@ -124,17 +123,23 @@ class HTTPServer(Server):
     def __init__(self, poller):
         super().__init__(poller, 80, socket.SOCK_STREAM, "HTTP Server")
 
+    def listen(self):
+        super().listen()
+        print("http listening")
+        self.sock.listen(1)
+
     def handle(self, sock, event, others):
-        if event == select.POLLIN:
-            try:
-                conn, addr = sock.accept()
-                print("HTTP Socket:", conn, "connected to:", addr)
-                conn.send(
-                    "<html><head><title>test</title></head><body>testtesttest</body></html>"
-                )
-                conn.close()
-            except Exception as e:
-                print("HTTP server exception:", str(e))
+        print("handling HTTP")
+        try:
+            data, addr = sock.recvfrom(1024)
+            print("HTTP Socket connected to:", addr, "and got data", data)
+            self.sock.send(
+                "<html><head><title>test</title></head><body>testtesttest</body></html>"
+            )
+            print("done sending HTTP")
+        except Exception as e:
+            print("HTTP server exception:", str(e))
+        print("done handling HTTP")
 
 
 def configure_wan():
@@ -161,9 +166,7 @@ def captive_portal():
     try:
         while True:
             http_server.poll()
-            time.sleep(0.1)
             dns_server.poll()
-            time.sleep(0.1)
     except KeyboardInterrupt:
         print("Captive portal stopped")
         http_server.stop()
