@@ -56,6 +56,8 @@ class DNSQuery:
         # now actually send the IP address as 4 bytes (without the "."s)
         packet += bytes(map(int, ip_addr.split(".")))
 
+        gc.collect()
+
         return packet
 
 
@@ -135,7 +137,8 @@ class HTTPServer(Server):
 
                 headers, base_path = self.check_route(s, req)
                 if headers is None or base_path is None:
-                    return
+                    base_path = b"/"
+                    headers = b"HTTP/1.1 404 Not Found"
 
                 serve = self.routes.get(base_path)
                 if type(serve) is bytes:
@@ -145,7 +148,6 @@ class HTTPServer(Server):
                 elif callable(serve):
                     body = uio.BytesIO(serve(*get[1:]) or b"")
                 else:
-                    headers = b"HTTP/1.1 404 Not Found\r\n"
                     body = uio.BytesIO(b"")
                 self.write(s, body, headers)
         else:
@@ -165,6 +167,10 @@ class HTTPServer(Server):
         if req_type != b"GET":
             headers = b"HTTP/1.1 404 Not Found"
             base_path = b"/"
+            return headers, base_path
+        if base_path in [b"/generate_204", b"/gen_204"]:
+            print("\tgenerating 204 response for connectivity check")
+            headers = b"HTTP/1.1 204 No Content\r\n"
             return headers, base_path
         if base_path in [b"/", b"/authenticating"]:
             headers = b"HTTP/1.1 200 OK\r\n"
@@ -204,8 +210,6 @@ class HTTPServer(Server):
 
     def write(self, s, body, headers):
         headers += "\r\n"
-        print("outgoing body:", body)
-        print("outgoing headers:", headers)
         buf = bytearray(headers + "\x00" * (536 - len(headers)))
         bufmv = memoryview(buf)
         bw = body.readinto(bufmv[len(headers) :], 536 - len(headers))
@@ -264,20 +268,16 @@ def configure_wan(mode="AP"):
     sta_if.active(not ap_mode)
 
     if ap_mode:
+        ap_if.active(False)
         while not ap_if.active():
-            print("waiting for AP mode to turn on", ap_if.active())
+            print("waiting for AP mode to turn on")
             ap_if.active(True)
             time.sleep(1)
         # IP address, netmask, gateway, DNS
-        print("setting AP mode")
-        print("active:", ap_if.active())
-        print("iconfig:", ap_if.ifconfig())
-        try:
-            ap_if.ifconfig((LOCAL_IP, "255.255.255.0", LOCAL_IP, LOCAL_IP))
-        except Exception as e:
-            print("failed to set ifconfig:", str(e), e.args[0])
+        ap_if.ifconfig((LOCAL_IP, "255.255.255.0", LOCAL_IP, LOCAL_IP))
         essid = b"ESP8266-%s" % binascii.hexlify(ap_if.config("mac")[-3:])
         ap_if.config(essid=essid, authmode=network.AUTH_OPEN)
+        print("AP mode configured:", ap_if.ifconfig())
 
 
 def check_for_valid_wifi():
@@ -319,8 +319,8 @@ def captive_portal():
     dns_server = DNSServer(poller, LOCAL_IP)
     try:
         while not check_for_valid_wifi():
-            responses = poller.poll(1000)
-            for response in responses:
+            gc.collect()
+            for response in poller.ipoll(-1):
                 sock, event, *others = response
                 if sock is dns_server.sock and event == select.POLLHUP:
                     continue
@@ -329,16 +329,9 @@ def captive_portal():
                 else:
                     # all other sockets should belong to HTTP
                     http_server.handle(sock, event, others)
-            gc.collect()
     except KeyboardInterrupt:
         print("Captive portal stopped")
     print("Cleaning up")
     http_server.stop(poller)
     dns_server.stop(poller)
-    del http_server
-    del dns_server
     gc.collect()
-
-
-configure_wan(mode="AP")
-gc.collect()
