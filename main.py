@@ -7,22 +7,9 @@ import utime as time
 import uio
 import gc
 
-LOCAL_IP = "192.168.4.1"
+gc.collect()
 
-# https://success.tanaza.com/s/article/How-Automatic-Detection-of-Captive-Portal-works
-CONN_CHECKS = [
-    "akamai",
-    "gstatic",
-    "ncsi",
-    "msftconnecttest",
-    "connectivitycheck",
-    "clients3",
-    "google",
-    "login",
-    "gvt3",
-    "apple",
-    "gvt2",
-]
+LOCAL_IP = "192.168.4.1"
 
 ssid = None
 password = None
@@ -90,8 +77,8 @@ class Server:
         print(self.name, "listening on", addr)
 
     def stop(self, poller):
-        self.sock.close()
         poller.unregister(self.sock)
+        self.sock.close()
         print(self.name, "stopped")
 
 
@@ -136,7 +123,6 @@ class HTTPServer(Server):
     def routefile(self, path, file):
         self.routes[path.encode()] = file.encode()
 
-    @micropython.native
     def read(self, s):
         data = s.read()
         if data:
@@ -275,12 +261,21 @@ def configure_wan(mode="AP"):
     ap_if = network.WLAN(network.AP_IF)
     sta_if = network.WLAN(network.STA_IF)
 
-    ap_if.active(ap_mode)
     sta_if.active(not ap_mode)
 
     if ap_mode:
+        while not ap_if.active():
+            print("waiting for AP mode to turn on", ap_if.active())
+            ap_if.active(True)
+            time.sleep(1)
         # IP address, netmask, gateway, DNS
-        ap_if.ifconfig((LOCAL_IP, "255.255.255.0", LOCAL_IP, LOCAL_IP))
+        print("setting AP mode")
+        print("active:", ap_if.active())
+        print("iconfig:", ap_if.ifconfig())
+        try:
+            ap_if.ifconfig((LOCAL_IP, "255.255.255.0", LOCAL_IP, LOCAL_IP))
+        except Exception as e:
+            print("failed to set ifconfig:", str(e), e.args[0])
         essid = b"ESP8266-%s" % binascii.hexlify(ap_if.config("mac")[-3:])
         ap_if.config(essid=essid, authmode=network.AUTH_OPEN)
 
@@ -301,17 +296,20 @@ def check_for_valid_wifi():
             attempts += 1
         else:
             print("Connected to {:s}".format(ssid))
-            configure_wan(mode="STA")
+            network.WLAN(network.AP_IF).active(False)
+            gc.collect()
             return True
     configure_wan(mode="AP")
     print("Failed to connect to {:s} with {:s}".format(ssid, password))
-    ssid = None
-    password = None
+    ssid = password = None
     gc.collect()
     return False
 
 
 def captive_portal():
+    global ssid, password
+    ssid = password = None
+    configure_wan(mode="AP")
     # create a poller for both DNS and HTTP sockets
     poller = select.poll()
 
@@ -334,9 +332,13 @@ def captive_portal():
             gc.collect()
     except KeyboardInterrupt:
         print("Captive portal stopped")
-        http_server.stop(poller)
-        dns_server.stop(poller)
+    print("Cleaning up")
+    http_server.stop(poller)
+    dns_server.stop(poller)
+    del http_server
+    del dns_server
     gc.collect()
 
 
 configure_wan(mode="AP")
+gc.collect()
