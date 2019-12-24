@@ -24,6 +24,9 @@ CONN_CHECKS = [
     "gvt2",
 ]
 
+ssid = None
+password = None
+
 
 class DNSQuery:
     def __init__(self, data):
@@ -71,15 +74,19 @@ class DNSQuery:
 
 class Server:
     def __init__(self, poller, port, sock_type, name):
-        self.sock = socket.socket(socket.AF_INET, sock_type)
-        poller.register(self.sock, select.POLLIN)
-        self.port = port
         self.name = name
-        self.listen()
+        # create socket with correct type (stream (TCP) or datagram (UDP)
+        self.sock = socket.socket(socket.AF_INET, sock_type)
 
-    def listen(self):
-        addr = socket.getaddrinfo("0.0.0.0", self.port)[0][-1]
+        # register to get event updates for this socket
+        self.poller = poller
+        self.poller.register(self.sock, select.POLLIN)
+
+        addr = socket.getaddrinfo("0.0.0.0", port)[0][-1]
+        # allow new requests while still sending last response
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(addr)
+
         print(self.name, "listening on", addr)
 
     def stop(self, poller):
@@ -92,63 +99,59 @@ class DNSServer(Server):
     def __init__(self, poller, ip_addr):
         super().__init__(poller, 53, socket.SOCK_DGRAM, "DNS Server")
         self.ip_addr = ip_addr
-        self.sock.settimeout(1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def handle(self, sock, event, others):
+        # server doesn't spawn other sockets, so only respond to its own socket
         if sock is not self.sock:
             return
-        print("Socket:", sock, "event", event)
+
+        # check the DNS question, and respond with an answer
         try:
-            start = time.ticks_ms()
             data, sender = sock.recvfrom(1024)
-            if not data:
-                return
-            diff = time.ticks_diff(time.ticks_ms(), start)
-            print("DNS receipt took:", diff)
             request = DNSQuery(data)
+
             print("Sending {:s} -> {:s}".format(request.domain, self.ip_addr))
             sock.sendto(request.answer(self.ip_addr), sender)
         except Exception as e:
-            if e.args[0] != uerrno.ETIMEDOUT:
-                print("DNS server exception:", e)
+            print("DNS server exception:", e)
 
 
 class HTTPServer(Server):
     def __init__(self, poller):
         super().__init__(poller, 80, socket.SOCK_STREAM, "HTTP Server")
-        poller.modify(self.sock, select.POLLIN)
-        self.poller = poller
         self.routes = dict()
         self.request = dict()
         self.conns = dict()
 
-    def listen(self):
-        super().listen()
-        self.sock.listen(5)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.listen(1)
         self.sock.setblocking(False)
 
     def accept(self, s):
+        # accept a new socket connection for a particular request
         sock, addr = s.accept()
-        print("Accepted connection from:", addr)
+        # register new socket with the poller so it can be made non-blocking
         sock.setblocking(False)
         self.poller.register(sock, select.POLLIN)
 
     def routefile(self, path, file):
         self.routes[path.encode()] = file.encode()
 
+    @micropython.native
     def read(self, s):
-        r = s.read()
-        if r:
-            self.request[id(s)] = self.request.get(id(s), b"") + r
-            if r[-4:] == b"\r\n\r\n":
+        data = s.read()
+        if data:
+            # add new data to the full request
+            self.request[id(s)] = self.request.get(id(s), b"") + data
+            # HTTP requests end with a blank line
+            if data[-4:] == b"\r\n\r\n":
+                # get the completed request
                 req = self.request.pop(id(s))
-                get = req.split(b" ", 2)[1].split(b"?", 1)
-                path = get[0]
-                print("requested path:", path)
-                serve = self.routes.get(path)
-                headers = b"HTTP/1.1 200 OK\r\n"
+
+                headers, base_path = self.check_route(s, req)
+                if headers is None or base_path is None:
+                    return
+
+                serve = self.routes.get(base_path)
                 if type(serve) is bytes:
                     if serve[-3:] == b".gz":
                         headers += b"Content-Encoding: gzip\r\n"
@@ -158,15 +161,71 @@ class HTTPServer(Server):
                 else:
                     headers = b"HTTP/1.1 404 Not Found\r\n"
                     body = uio.BytesIO(b"")
-                headers += "\r\n"
-                buf = bytearray(headers + "\x00" * (536 - len(headers)))
-                bufmv = memoryview(buf)
-                bw = body.readinto(bufmv[len(headers) :], 536 - len(headers))
-                c = (body, buf, bufmv, [0, len(headers) + bw])
-                self.conns[id(s)] = c
-                self.poller.modify(s, select.POLLOUT)
+                self.write(s, body, headers)
         else:
+            # no data in the TCP stream, so close the socket that was opened for this transmission
             self.close(s)
+
+    def check_route(self, s, req):
+        req_lines = req.split(b"\r\n")
+        req_type, full_path, http_ver = req_lines[0].split(b" ")
+
+        base_path = full_path.split(b"?")[0]
+        if len(full_path.split(b"?")) > 1:
+            params = full_path.split(b"?")[1].split(b"&")
+        else:
+            params = []
+        print(req_type, base_path)
+        if req_type != b"GET":
+            headers = b"HTTP/1.1 404 Not Found"
+            base_path = b"/"
+            return headers, base_path
+        if base_path in [b"/", b"/authenticating"]:
+            headers = b"HTTP/1.1 200 OK\r\n"
+            return headers, base_path
+        elif base_path == b"/login":
+            wifi_params = {}
+            for param in params:
+                print("Param --", param)
+                key, val = param.split(b"=")
+                wifi_params[key] = val
+
+            print("wifi params:", wifi_params)
+            if b"ssid" in wifi_params and b"password" in wifi_params:
+                global ssid, password
+                ssid = wifi_params[b"ssid"]
+                password = wifi_params[b"password"]
+            if len(params) >= 2:
+                headers = b"HTTP/1.1 302 OK\r\nLocation: /authenticating"
+                base_path = b"/authenticating"
+
+                return headers, base_path
+            else:
+                # wrong params
+                self.redirect(s)
+                return None, None
+        else:
+            # unrecognized path
+            self.redirect(s)
+            return None, None
+
+    def redirect(self, s):
+        headers = b"HTTP/1.1 307 Temporary Redirect\r\n"
+        headers += b"Location: http://{:s}/".format(LOCAL_IP)
+        body = uio.BytesIO(b"Please login first")
+        self.write(s, body, headers)
+        return None
+
+    def write(self, s, body, headers):
+        headers += "\r\n"
+        print("outgoing body:", body)
+        print("outgoing headers:", headers)
+        buf = bytearray(headers + "\x00" * (536 - len(headers)))
+        bufmv = memoryview(buf)
+        bw = body.readinto(bufmv[len(headers) :], 536 - len(headers))
+        c = (body, buf, bufmv, [0, len(headers) + bw])
+        self.conns[id(s)] = c
+        self.poller.modify(s, select.POLLOUT)
 
     def bufferfile(self, c, w):
         if w == c[3][1] - c[3][0]:
@@ -188,41 +247,68 @@ class HTTPServer(Server):
     def handle(self, sock, event, others):
         print("handling HTTP")
         if sock is self.sock:
-            print("HTTP accepting connection")
+            # client connecting on port 80, so spawn off a new socket to handle this connection
+            print("\taccepting new incoming HTTP connection")
             self.accept(sock)
         elif event & select.POLLOUT:
-            print("HTTP sending outgoing")
+            # an existing spawned socket has space to send more data
+            print("\tHTTP sending outgoing")
             c = self.conns[id(sock)]
-            if c is None:
-                print("failed to find outgoing socket")
-                return False
             if c:
                 w = sock.write(c[2][c[3][0] : c[3][1]])
                 if not w or c[3][1] < 536:
                     self.close(sock)
                 else:
-                    bufferfile(c, w)
+                    self.bufferfile(c, w)
+            else:
+                print("\tfailed to find outgoing socket")
         elif event & select.POLLIN:
-            print("HTTP reading incoming")
+            print("\tHTTP reading incoming")
             self.read(sock)
 
         print("done handling HTTP")
         return True
 
 
-def configure_wan():
-
-    # turn off Station Mode
-    network.WLAN(network.STA_IF).active(False)
-
-    # turn on and configure Access Point Mode
+def configure_wan(mode="AP"):
+    ap_mode = mode == "AP"
     ap_if = network.WLAN(network.AP_IF)
+    sta_if = network.WLAN(network.STA_IF)
 
-    # IP address, netmask, gateway, DNS
-    ap_if.ifconfig((LOCAL_IP, "255.255.255.0", LOCAL_IP, LOCAL_IP))
-    essid = b"ESP8266-%s" % binascii.hexlify(ap_if.config("mac")[-3:])
-    ap_if.config(essid=essid, authmode=network.AUTH_OPEN)
-    ap_if.active(True)
+    ap_if.active(ap_mode)
+    sta_if.active(not ap_mode)
+
+    if ap_mode:
+        # IP address, netmask, gateway, DNS
+        ap_if.ifconfig((LOCAL_IP, "255.255.255.0", LOCAL_IP, LOCAL_IP))
+        essid = b"ESP8266-%s" % binascii.hexlify(ap_if.config("mac")[-3:])
+        ap_if.config(essid=essid, authmode=network.AUTH_OPEN)
+
+
+def check_for_valid_wifi():
+    global ssid, password
+    if ssid is None or password is None:
+        return False
+    print("Have WiFi Credentials, attempting connection...")
+    sta_if = network.WLAN(network.STA_IF)
+    sta_if.active(True)
+    sta_if.connect(ssid, password)
+    attempts = 0
+    while attempts < 10:
+        if not sta_if.isconnected():
+            print("Not connected yet")
+            time.sleep(2)
+            attempts += 1
+        else:
+            print("Connected to {:s}".format(ssid))
+            configure_wan(mode="STA")
+            return True
+    configure_wan(mode="AP")
+    print("Failed to connect to {:s} with {:s}".format(ssid, password))
+    ssid = None
+    password = None
+    gc.collect()
+    return False
 
 
 def captive_portal():
@@ -231,28 +317,26 @@ def captive_portal():
 
     http_server = HTTPServer(poller)
     http_server.routefile("/", "./index.html")
-    http_server.routefile("/generate_204", "./index.html")
+    http_server.routefile("/authenticating", "./authenticating.html")
     dns_server = DNSServer(poller, LOCAL_IP)
     try:
-        while True:
-            responses = poller.poll(100)
-            if not responses:
-                continue
+        while not check_for_valid_wifi():
+            responses = poller.poll(1000)
             for response in responses:
                 sock, event, *others = response
-                if event == select.POLLHUP:
+                if sock is dns_server.sock and event == select.POLLHUP:
                     continue
-                print("Response", response)
                 if sock is dns_server.sock:
                     dns_server.handle(sock, event, others)
                 else:
-                    print("processing with HTTP")
+                    # all other sockets should belong to HTTP
                     http_server.handle(sock, event, others)
             gc.collect()
     except KeyboardInterrupt:
         print("Captive portal stopped")
         http_server.stop(poller)
         dns_server.stop(poller)
+    gc.collect()
 
 
-configure_wan()
+configure_wan(mode="AP")

@@ -1,12 +1,75 @@
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WiFi Login</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        background: #3498db;
+        width: 100%;
+        text-align: center;
+        margin: 20px 0px 20px 0px;
+      }
+      p {
+        font-size: 12px;
+        text-decoration: none;
+        color: #fff;
+      }
+      h1 {
+        font-size: 1.5em;
+        color: #525252;
+      }
+      .box {
+        background: white;
+        width: 50%;
+        border-radius: 6px;
+        margin: 0 auto 0 auto;
+        padding: 10px 0px 10px 0px;
+      }
+      input[type='text'],
+      input[type='password'] {
+        background: #ecf0f1;
+        border: #ccc 1px solid;
+        border-bottom: #ccc 2px solid;
+        padding: 8px;
+        width: 60%;
+        color: #aaa;
+        margin-top: 10px;
+        font-size: 1em;
+        border-radius: 4px;
+      }
+      .btn {
+        background: #2ecc71;
+        width: 50%;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        color: white;
+        border-radius: 4px;
+        border: #27ae60 1px solid;
+        margin: 20 auto;
+        font-weight: 800;
+        font-size: 0.8em;
+      }
+    </style>
   </head>
   <body>
-    Please enter WiFi login credentials below:
-    <br />
-    <b>SSID:</b>
-    <hr />
-    <b>Password:</b>
+    <form action="/login" method="get" class="box">
+      <h1>WiFi login credentials</h1>
+      <input type="text" placeholder="My WiFi SSID" name="ssid" required />
+
+      <br />
+
+      <input
+        type="password"
+        placeholder="WiFi Password"
+        name="password"
+        required
+      />
+
+      <br />
+
+      <button type="submit" class="btn">Connect</button>
+    </form>
   </body>
 </html>
