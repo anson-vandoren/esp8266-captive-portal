@@ -109,8 +109,12 @@ def captive_portal():
                 print("No clients connected to access point")
                 time.sleep(1)
             if check_for_valid_wifi():
-                print("updating http server with new local ip:", local_ip)
-                http_server.set_ip(local_ip)
+                print(
+                    "updating http server with new local ip: {:s} and SSID: {:s}".format(
+                        local_ip, ssid
+                    )
+                )
+                http_server.set_ip(local_ip, ssid)
         else:
             print("Connected with IP:", local_ip)
     except KeyboardInterrupt:

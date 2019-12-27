@@ -2,6 +2,7 @@ import gc
 import usocket as socket
 import uselect as select
 import network  # needed for socket instantiation
+import uerrno
 import uio
 
 from server import Server
@@ -18,14 +19,21 @@ class HTTPServer(Server):
         self.sock.listen(1)
         self.sock.setblocking(False)
         self.is_connected = False
+        self.ssid = None
 
-    def set_ip(self, new_ip):
+    def set_ip(self, new_ip, new_ssid):
         self.local_ip = new_ip.encode()
+        self.ssid = ssid
         self.is_connected = True
 
     def accept(self, s):
         # accept a new socket connection for a particular request
-        sock, addr = s.accept()
+        try:
+            sock, addr = s.accept()
+        except OSError as e:
+            if e.args[0] == uerrno.EAGAIN:
+                print("failed to accept on socket:", s)
+                return
         # register new socket with the poller so it can be made non-blocking
         sock.setblocking(False)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -35,9 +43,7 @@ class HTTPServer(Server):
         self.routes[path.encode()] = file.encode()
 
     def conn_page(self):
-        return b"<html><head><title>Connected!</title></head><body>Device is connected to local WiFi with IP address: {:s}</body></html>".format(
-            self.local_ip
-        )
+        return open("./connected.html", "rb").read() % (self.ssid, self.local_ip)
 
     def send_response(self, s, route, headers):
         if type(route) is bytes:
