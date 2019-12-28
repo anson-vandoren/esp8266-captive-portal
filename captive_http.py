@@ -5,13 +5,20 @@ import network  # needed for socket instantiation
 import uerrno
 import uio
 
+from collections import namedtuple
+
+ReqInfo = namedtuple("ReqInfo", ["type", "path", "params", "host"])
+
 from server import Server
 
 
 class HTTPServer(Server):
     def __init__(self, poller, local_ip):
         super().__init__(poller, 80, socket.SOCK_STREAM, "HTTP Server")
-        self.local_ip = local_ip.encode()
+        if type(local_ip) is bytes:
+            self.local_ip = local_ip
+        else:
+            self.local_ip = local_ip.encode()
         self.routes = dict()
         self.request = dict()
         self.conns = dict()
@@ -22,149 +29,157 @@ class HTTPServer(Server):
         self.ssid = None
 
     def set_ip(self, new_ip, new_ssid):
+        """update settings after connected to local WiFi"""
+
         self.local_ip = new_ip.encode()
-        self.ssid = ssid
+        self.ssid = new_ssid
         self.is_connected = True
 
     def accept(self, s):
-        # accept a new socket connection for a particular request
+        """accept a new client request socket and register it for polling"""
+
         try:
             sock, addr = s.accept()
         except OSError as e:
             if e.args[0] == uerrno.EAGAIN:
-                print("failed to accept on socket:", s)
+                print("failed to accept a new socket:", s)
                 return
-        # register new socket with the poller so it can be made non-blocking
+
         sock.setblocking(False)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.poller.register(sock, select.POLLIN)
 
     def routefile(self, path, file):
+        """set the file to serve for a given HTTP path"""
+
         self.routes[path.encode()] = file.encode()
 
     def conn_page(self):
+        """send a connection status page if connected to local WiFi"""
+
         return open("./connected.html", "rb").read() % (self.ssid, self.local_ip)
 
     def send_response(self, s, route, headers):
+        """send HTTP response to the client based on route given"""
+
         if type(route) is bytes:
-            print("route is bytes")
+            # expecting a known route
             body = open(route, "rb")
         elif callable(route):
-            print("route is callable")
             body = uio.BytesIO(route() or b"")
         else:
-            print("route is other:", route)
+            # unknown route
+            if not route:
+                print("Empty route -> sending empty body")
+            else:
+                print(
+                    "Unknown route type {:s} for route {:s}".format(type(route), route)
+                )
             body = uio.BytesIO(b"")
+
+        # write the response to the socket
         self.write(s, body, headers)
 
     def read(self, s):
-        res = None
+        """read in client request from socket"""
+
         data = s.read()
-        if data:
-            # add new data to the full request
-            self.request[id(s)] = self.request.get(id(s), b"") + data
-            # HTTP requests end with a blank line
-            if data[-4:] == b"\r\n\r\n":
-                # get the completed request
-                req = self.request.pop(id(s))
-
-                headers, base_path, creds = self.check_route(s, req)
-                print("headers, base_path", headers, base_path)
-                if headers is None:
-                    return
-
-                if base_path == b"/authenticating":
-                    res = creds
-
-                if not self.is_connected:
-                    print("not connected, sending route:", base_path)
-                    route = self.routes.get(base_path)
-                else:
-                    print("is connected, sending default route:")
-                    route = self.conn_page
-                self.send_response(s, route, headers)
-        else:
-            # no data in the TCP stream, so close the socket that was opened for this transmission
-            print("closing:", s)
+        if not data:
+            # no data in the TCP stream, so close the socket
             self.close(s)
+            return None
 
-        return res
+        # add new data to the full request
+        self.request[id(s)] = self.request.get(id(s), b"") + data
+
+        # check if additional data expected
+        if data[-4:] != b"\r\n\r\n":
+            # HTTP request is not finished if no blank line at the end
+            return None
+
+        # get the completed request
+        req = self.request.pop(id(s))
+
+        headers, base_path, creds = self.check_route(s, req)
+        if headers is None:
+            return
+
+        if not self.is_connected:
+            print("not connected, sending route:", base_path)
+            route = self.routes.get(base_path)
+        else:
+            print("is connected, sending default route:")
+            route = self.conn_page
+        self.send_response(s, route, headers)
+        return creds
 
     def is_valid_host(self, host):
-        # Android sends weird requests
+        # Android sends weird requests. Ignore those
         return len(host.split(b".")) > 1
 
-    def check_route(self, s, req):
-        creds = None
+    def parse_request(self, req):
+        """parse a raw HTTP request to get items of interest"""
+
         req_lines = req.split(b"\r\n")
         req_type, full_path, http_ver = req_lines[0].split(b" ")
-        base_path = full_path.split(b"?")[0]
+        path = full_path.split(b"?")
+        base_path = path[0]
+        query = path[1] if len(path) > 1 else None
+        host = [line.split(b": ")[1] for line in req_lines if b"Host:" in line][0]
+        query_params = (
+            {
+                key: val
+                for key, val in [param.split(b"=") for param in query.split(b"&")]
+            }
+            if query
+            else {}
+        )
+        return ReqInfo(req_type, base_path, query_params, host)
 
-        host = [line.split(b": ")[1].strip() for line in req_lines if b"Host:" in line][
-            0
-        ]
+    def check_route(self, s, raw_req):
+        req = self.parse_request(raw_req)
 
-        print("**Checking Route -- Host: {:s}, Base Path: {:s}".format(host, base_path))
-
-        if base_path in [b"/generate_204", b"/gen_204"]:
+        if req.path in [b"/generate_204", b"/gen_204"] and self.is_connected:
             print("\tgenerating 204 response for connectivity check")
             headers = b"HTTP/1.1 204 No Content\r\n"
-            return headers, base_path, creds
+            return headers, req.path, None
 
-        if not self.is_valid_host(host):
-            print("invalid host:", host)
+        if not self.is_valid_host(req.host):
+            # Android sends DNS/HTTP requests for malformed hosts sometimes
             headers = b"HTTP/1.1 404 Not Found\r\n"
-            base_path = None
-            return headers, base_path, creds
+            return headers, None, None
 
-        if host != self.local_ip:
+        if req.host != self.local_ip:
             print(
-                "Wrong hostname: {:s} -> redirecting to {:s}".format(
-                    host, self.local_ip
+                "Wrong hostname: {:s} -> redirecting to {:s}/".format(
+                    req.host, self.local_ip
                 )
             )
-            print("Full Request:")
-            for line in req_lines:
-                print(line)
-            print()
             return self.redirect(s, self.local_ip, b"/")
 
-        if len(full_path.split(b"?")) > 1:
-            params = full_path.split(b"?")[1].split(b"&")
-        else:
-            params = []
-
-        if req_type != b"GET":
-            print("Not a GET request:", req_type, base_path)
+        if req.type != b"GET" and req.path not in self.routes:
+            print("Not a GET request to a known resource:", req_type, req.path)
             headers = b"HTTP/1.1 404 Not Found"
-            base_path = b"/"
-            return headers, base_path, creds
-        if base_path in [b"/", b"/authenticating"]:
-            headers = b"HTTP/1.1 200 OK\r\n"
-            return headers, base_path, creds
-        elif base_path == b"/login":
-            wifi_params = {}
-            for param in params:
-                print("Param --", param)
-                key, val = param.split(b"=")
-                wifi_params[key] = val
+            return headers, b"/", None
 
-            if b"ssid" in wifi_params and b"password" in wifi_params:
-                global ssid, password
-                ssid = wifi_params[b"ssid"]
-                password = wifi_params[b"password"]
-                headers = b"HTTP/1.1 302 OK\r\nLocation: http://{:s}/authenticating\r\n".format(
-                    self.local_ip
-                )
-                base_path = b"/authenticating"
-                return headers, base_path, (ssid, password)
-            else:
-                # wrong params
+        if req.path in [b"/", b"/authenticating"]:
+            headers = b"HTTP/1.1 200 OK\r\n"
+            return headers, req.path, None
+
+        if req.path == b"/login":
+            ssid = req.params.get(b"ssid", None)
+            password = req.params.get(b"password", None)
+            if not all([ssid, password]):
+                # missing login parameters
                 return self.redirect(s)
+            headers = b"HTTP/1.1 302 OK\r\nLocation: http://{:s}/authenticating\r\n".format(
+                self.local_ip
+            )
+            return (headers, b"/authenticating", (ssid, password))
         else:
             # unrecognized path
             headers = b"HTTP/1.1 404 Not Found\r\n"
-            return headers, base_path, creds
+            return headers, req.path, None
 
     def redirect(self, s, host=None, path=b"/"):
         if host is None:

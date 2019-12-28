@@ -54,6 +54,11 @@ class DNSServer(Server):
     def __init__(self, poller, ip_addr):
         super().__init__(poller, 53, socket.SOCK_DGRAM, "DNS Server")
         self.ip_addr = ip_addr
+        self.is_active = True
+
+    def set_ip(self, new_ip):
+        """update settings after connected to local WiFi"""
+        self.ip_addr = new_ip
 
     def handle(self, sock, event, others):
         # server doesn't spawn other sockets, so only respond to its own socket
