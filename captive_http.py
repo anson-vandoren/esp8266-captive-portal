@@ -24,7 +24,8 @@ class HTTPServer(Server):
         self.request = dict()
         self.conns = dict()
 
-        self.sock.listen(1)
+        # queue up to 5 connection requests before refusing
+        self.sock.listen(5)
         self.sock.setblocking(False)
         self.is_connected = False
         self.ssid = None
@@ -36,19 +37,18 @@ class HTTPServer(Server):
         self.ssid = new_ssid
         self.is_connected = True
 
-    def accept(self, s):
+    def accept(self, server_sock):
         """accept a new client request socket and register it for polling"""
 
         try:
-            sock, addr = s.accept()
+            client_sock, addr = server_sock.accept()
         except OSError as e:
             if e.args[0] == uerrno.EAGAIN:
-                print("failed to accept a new socket:", s)
                 return
 
-        sock.setblocking(False)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.poller.register(sock, select.POLLIN)
+        client_sock.setblocking(False)
+        client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.poller.register(client_sock, select.POLLIN)
 
     def routefile(self, path, file):
         """set the file to serve for a given HTTP path"""
@@ -97,6 +97,7 @@ class HTTPServer(Server):
         # check if additional data expected
         if data[-4:] != b"\r\n\r\n":
             # HTTP request is not finished if no blank line at the end
+            # wait for next read event on this socket instead
             return
 
         # get the completed request
@@ -240,6 +241,23 @@ class HTTPServer(Server):
             del self.conns[sid]
         gc.collect()
 
+    def write_to(self, sock):
+        """write the next message to an open socket"""
+
+        # get the data that needs to be written to this socket
+        c = self.conns[id(sock)]
+        if c:
+            # write next 536 bytes (max) into the socket
+            bytes_written = sock.write(c.buffmv[c.write_range[0] : c.write_range[1]])
+            if not bytes_written or c.write_range[1] < 536:
+                # either we wrote no bytes, or we wrote < TCP MSS of bytes
+                # so we're done with this connection
+                self.close(sock)
+            else:
+                # more to write, so read the next portion of the data into
+                # the memoryview for the next send event
+                self.buff_advance(c, bytes_written)
+
     @micropython.native
     def handle(self, sock, event, others):
         res = None
@@ -248,29 +266,15 @@ class HTTPServer(Server):
             # socket to handle this connection
             print("- Accepting new HTTP connection")
             self.accept(sock)
-        elif event & select.POLLOUT:
-            # existing connection has space to send more data
-            print("- Sending outgoing HTTP data")
-            # get the data that needs to be written to this socket
-            c = self.conns[id(sock)]
-            if c:
-                # write next 536 bytes (max) into the socket
-                bytes_written = sock.write(
-                    c.buffmv[c.write_range[0] : c.write_range[1]]
-                )
-                if not bytes_written or c.write_range[1] < 536:
-                    # either we wrote no bytes, or we wrote < TCP MSS of bytes
-                    # so we're done with this connection
-                    self.close(sock)
-                else:
-                    # more to write, so read the next portion of the data into
-                    # the memoryview for the next send event
-                    self.buff_advance(c, bytes_written)
         elif event & select.POLLIN:
             # socket has data to read in
             print("- Reading incoming HTTP data")
             res = self.read(sock)
             if res is not None:
                 print("Got credentials")
+        elif event & select.POLLOUT:
+            # existing connection has space to send more data
+            print("- Sending outgoing HTTP data")
+            self.write_to(sock)
 
         return res

@@ -137,10 +137,10 @@ class CaptivePortal:
         self.start_access_point()
 
         if self.http_server is None:
-            print("Configured HTTP server")
             self.http_server = HTTPServer(self.poller, self.local_ip)
             self.http_server.routefile("/", "./index.html")
             self.http_server.routefile("/authenticating", "./authenticating.html")
+            print("Configured HTTP server")
         if self.dns_server is None:
             self.dns_server = DNSServer(self.poller, self.local_ip)
             print("Configured DNS server")
