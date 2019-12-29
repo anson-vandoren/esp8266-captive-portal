@@ -8,6 +8,7 @@ import uio
 from collections import namedtuple
 
 ReqInfo = namedtuple("ReqInfo", ["type", "path", "params", "host"])
+WriteConn = namedtuple("WriteConn", ["body", "buff", "buffmv", "write_range"])
 
 from server import Server
 
@@ -78,7 +79,7 @@ class HTTPServer(Server):
             body = uio.BytesIO(b"")
 
         # write the response to the socket
-        self.write(s, body, headers)
+        self.prepare_write(s, body, headers)
 
     def read(self, s):
         """read in client request from socket"""
@@ -87,18 +88,19 @@ class HTTPServer(Server):
         if not data:
             # no data in the TCP stream, so close the socket
             self.close(s)
-            return None
+            return
 
         # add new data to the full request
-        self.request[id(s)] = self.request.get(id(s), b"") + data
+        sid = id(s)
+        self.request[sid] = self.request.get(sid, b"") + data
 
         # check if additional data expected
         if data[-4:] != b"\r\n\r\n":
             # HTTP request is not finished if no blank line at the end
-            return None
+            return
 
         # get the completed request
-        req = self.request.pop(id(s))
+        req = self.request.pop(sid)
 
         headers, base_path, creds = self.check_route(s, req)
         if headers is None:
@@ -190,60 +192,85 @@ class HTTPServer(Server):
         headers += b"Location: http://{:s}/{:s}\r\n".format(host, path)
         print("headers:", headers)
         body = uio.BytesIO(b"Redirecting")
-        self.write(s, body, headers)
+        self.prepare_write(s, body, headers)
         return None, None, None
 
-    def write(self, s, body, headers):
+    def prepare_write(self, s, body, headers):
+        # add newline to headers to signify transition to body
         headers += "\r\n"
-        buf = bytearray(headers + "\x00" * (536 - len(headers)))
-        bufmv = memoryview(buf)
-        bw = body.readinto(bufmv[len(headers) :], 536 - len(headers))
-        c = (body, buf, bufmv, [0, len(headers) + bw])
+        # TCP/IP MSS is 536 bytes, so create buffer of this size and
+        # initially populate with header data
+        buff = bytearray(headers + "\x00" * (536 - len(headers)))
+        # use memoryview to read directly into the buffer without copying
+        buffmv = memoryview(buff)
+        # start reading body data into the memoryview starting after
+        # the headers, and writing at most the remaining space of the buffer
+        # return the number of bytes written into the memoryview from the body
+        bw = body.readinto(buffmv[len(headers) :], 536 - len(headers))
+        # save place for next write event
+        c = WriteConn(body, buff, buffmv, [0, len(headers) + bw])
         self.conns[id(s)] = c
+        # let the poller know we want to know when it's OK to write
         self.poller.modify(s, select.POLLOUT)
 
-    def bufferfile(self, c, w):
-        if w == c[3][1] - c[3][0]:
-            c[3][0] = 0
-            c[3][1] = c[0].readinto(c[1], 536)
+    def buff_advance(self, c, bytes_written):
+        """advance the writer buffer for this connection to next outgoing bytes"""
+
+        if bytes_written == c.write_range[1] - c.write_range[0]:
+            # wrote all the bytes we had buffered into the memoryview
+            # set next write start on the memoryview to the beginning
+            c.write_range[0] = 0
+            # set next write end on the memoryview to length of bytes
+            # read in from remainder of the body, up to TCP MSS
+            c.write_range[1] = c.body.readinto(c.buff, 536)
         else:
-            c[3][0] += w
+            # didn't read in all the bytes that were in the memoryview
+            # so just set next write start to where we ended the write
+            c.write_range[0] += bytes_written
 
     def close(self, s):
+        """close the socket, unregister from poller, and delete connection"""
+
         s.close()
         self.poller.unregister(s)
         sid = id(s)
         if sid in self.request:
-            del self.request[id(s)]
+            del self.request[sid]
         if sid in self.conns:
-            del self.conns[id(s)]
+            del self.conns[sid]
         gc.collect()
 
     @micropython.native
     def handle(self, sock, event, others):
         res = None
-        print("{:s} -- ".format(self.name))
         if sock is self.sock:
-            # client connecting on port 80, so spawn off a new socket to handle this connection
-            print("- accepting new incoming HTTP connection")
+            # client connecting on port 80, so spawn off a new
+            # socket to handle this connection
+            print("- Accepting new HTTP connection")
             self.accept(sock)
         elif event & select.POLLOUT:
-            # an existing spawned socket has space to send more data
-            print("- HTTP sending outgoing")
+            # existing connection has space to send more data
+            print("- Sending outgoing HTTP data")
+            # get the data that needs to be written to this socket
             c = self.conns[id(sock)]
             if c:
-                w = sock.write(c[2][c[3][0] : c[3][1]])
-                if not w or c[3][1] < 536:
+                # write next 536 bytes (max) into the socket
+                bytes_written = sock.write(
+                    c.buffmv[c.write_range[0] : c.write_range[1]]
+                )
+                if not bytes_written or c.write_range[1] < 536:
+                    # either we wrote no bytes, or we wrote < TCP MSS of bytes
+                    # so we're done with this connection
                     self.close(sock)
                 else:
-                    self.bufferfile(c, w)
-            else:
-                print("- failed to find outgoing socket")
+                    # more to write, so read the next portion of the data into
+                    # the memoryview for the next send event
+                    self.buff_advance(c, bytes_written)
         elif event & select.POLLIN:
-            print("- HTTP reading incoming")
+            # socket has data to read in
+            print("- Reading incoming HTTP data")
             res = self.read(sock)
             if res is not None:
                 print("Got credentials")
 
-        print("{:s} -- done".format(self.name))
         return res

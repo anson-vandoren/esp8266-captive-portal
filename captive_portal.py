@@ -46,7 +46,7 @@ class CaptivePortal:
 
     def connect_to_wifi(self):
         print(
-            "Trying to connect to WiFi '{:s} with password {:s}".format(
+            "Trying to connect to SSID '{:s}' with password {:s}".format(
                 self.ssid, self.password
             )
         )
@@ -98,6 +98,7 @@ class CaptivePortal:
             # handle DNS server first since HTTP may have many sockets open
             self.dns_server.handle(sock, event, others)
             return True
+        return False
 
     def handle_http(self, sock, event, others):
         # remaining sockets should belong to HTTP
@@ -141,8 +142,8 @@ class CaptivePortal:
             self.http_server.routefile("/", "./index.html")
             self.http_server.routefile("/authenticating", "./authenticating.html")
         if self.dns_server is None:
-            print("Configured DNS server")
             self.dns_server = DNSServer(self.poller, self.local_ip)
+            print("Configured DNS server")
 
         try:
             while True:
@@ -180,10 +181,12 @@ class CaptivePortal:
         gc.collect()
 
     def try_connect_from_file(self):
+        print("Trying to load WiFi credentials from {:s}".format(self.CRED_FILE))
         try:
             os.stat(self.CRED_FILE)
         except OSError as e:
             if e.args[0] == uerrno.ENOENT:
+                print("{:s} does not exist".format(self.CRED_FILE))
                 # file does not exist
                 return False
 
@@ -200,6 +203,7 @@ class CaptivePortal:
         return True
 
     def start(self):
+        # turn off station interface to force a reconnection
         self.sta_if.active(False)
         if not self.try_connect_from_file():
             self.captive_portal()

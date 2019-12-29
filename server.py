@@ -5,7 +5,7 @@ import uselect as select
 class Server:
     def __init__(self, poller, port, sock_type, name):
         self.name = name
-        # create socket with correct type (stream (TCP) or datagram (UDP)
+        # create socket with correct type: stream (TCP) or datagram (UDP)
         self.sock = socket.socket(socket.AF_INET, sock_type)
 
         # register to get event updates for this socket

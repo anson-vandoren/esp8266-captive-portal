@@ -72,6 +72,8 @@ class DNSServer(Server):
 
             print("Sending {:s} -> {:s}".format(request.domain, self.ip_addr))
             sock.sendto(request.answer(self.ip_addr), sender)
+
+            # help MicroPython with memory managament
             del request
             gc.collect()
         except Exception as e:
