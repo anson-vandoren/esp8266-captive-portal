@@ -56,9 +56,9 @@ class DNSServer(Server):
         self.ip_addr = ip_addr
         self.is_active = True
 
-    def set_ip(self, new_ip):
-        """update settings after connected to local WiFi"""
-        self.ip_addr = new_ip
+    def stop(self, poller):
+        super().stop(poller)
+        self.is_active = False
 
     def handle(self, sock, event, others):
         # server doesn't spawn other sockets, so only respond to its own socket
@@ -73,7 +73,7 @@ class DNSServer(Server):
             print("Sending {:s} -> {:s}".format(request.domain, self.ip_addr))
             sock.sendto(request.answer(self.ip_addr), sender)
 
-            # help MicroPython with memory managament
+            # help MicroPython with memory management
             del request
             gc.collect()
         except Exception as e:
