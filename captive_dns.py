@@ -54,11 +54,6 @@ class DNSServer(Server):
     def __init__(self, poller, ip_addr):
         super().__init__(poller, 53, socket.SOCK_DGRAM, "DNS Server")
         self.ip_addr = ip_addr
-        self.is_active = True
-
-    def stop(self, poller):
-        super().stop(poller)
-        self.is_active = False
 
     def handle(self, sock, event, others):
         # server doesn't spawn other sockets, so only respond to its own socket

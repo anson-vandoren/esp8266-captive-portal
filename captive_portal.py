@@ -140,10 +140,6 @@ class CaptivePortal:
                     self.http_server.set_ip(self.local_ip, self.ssid)
                     self.dns_server.stop(self.poller)
 
-                if not self.ap_if.active() and self.dns_server.is_active:
-                    print("Stopping DNS server")
-                    self.dns_server.stop(self.poller)
-
         except KeyboardInterrupt:
             print("Captive portal stopped")
         self.cleanup()
