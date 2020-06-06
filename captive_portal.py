@@ -77,6 +77,7 @@ class CaptivePortal:
         )
         # forget the credentials since they didn't work, and turn off station mode
         self.ssid = self.password = None
+        self.http_server.saved_credentials = (None, None)
         self.sta_if.active(False)
         return False
 
