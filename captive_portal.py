@@ -112,7 +112,8 @@ class CaptivePortal:
         return None not in [self.ssid, self.password]
 
     def write_creds(self, ssid, password):
-        open(self.CRED_FILE, "wb").write(b",".join([ssid, password]))
+        with open(self.CRED_FILE, "wb") as fp:
+          fp.write(b",".join([ssid, password]))
         print("Wrote credentials to {:s}".format(self.CRED_FILE))
 
     def captive_portal(self):
