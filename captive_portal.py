@@ -140,6 +140,7 @@ class CaptivePortal:
                     print("Connected to WiFi!")
                     self.http_server.set_ip(self.local_ip, self.ssid)
                     self.dns_server.stop(self.poller)
+                    break
 
         except KeyboardInterrupt:
             print("Captive portal stopped")
