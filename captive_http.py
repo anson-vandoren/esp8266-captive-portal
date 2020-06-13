@@ -4,6 +4,7 @@ import uselect as select
 import usocket as socket
 
 from collections import namedtuple
+from credentials import Creds
 
 WriteConn = namedtuple("WriteConn", ["body", "buff", "buffmv", "write_range"])
 ReqInfo = namedtuple("ReqInfo", ["type", "path", "params", "host"])
@@ -24,7 +25,6 @@ class HTTPServer(Server):
         self.conns = dict()
         self.routes = {b"/": b"./index.html", b"/login": self.login}
 
-        self.saved_credentials = (None, None)
         self.ssid = None
 
         # queue up to 5 connection requests before refusing
@@ -90,8 +90,9 @@ class HTTPServer(Server):
     def login(self, params):
         ssid = params.get(b"ssid", None)
         password = params.get(b"password", None)
-        if all([ssid, password]):
-            self.saved_credentials = (ssid, password)
+
+        # Write out credentials
+        Creds(ssid=ssid, password=password).write()
 
         headers = (
             b"HTTP/1.1 307 Temporary Redirect\r\n"

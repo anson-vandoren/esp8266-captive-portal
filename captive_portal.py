@@ -1,19 +1,17 @@
 import gc
 import network
 import ubinascii as binascii
-import uerrno
-import uos as os
 import uselect as select
 import utime as time
 
 from captive_dns import DNSServer
 from captive_http import HTTPServer
+from credentials import Creds
 
 
 class CaptivePortal:
     AP_IP = "192.168.4.1"
     AP_OFF_DELAY = const(10 * 1000)
-    CRED_FILE = "./wifi.creds"
     MAX_CONN_ATTEMPTS = 10
 
     def __init__(self, essid=None):
@@ -25,12 +23,11 @@ class CaptivePortal:
             essid = b"ESP8266-%s" % binascii.hexlify(self.ap_if.config("mac")[-3:])
         self.essid = essid
 
+        self.creds = Creds()
+
         self.dns_server = None
         self.http_server = None
         self.poller = select.poll()
-
-        self.ssid = None
-        self.password = None
 
         self.conn_time_start = None
 
@@ -51,39 +48,38 @@ class CaptivePortal:
     def connect_to_wifi(self):
         print(
             "Trying to connect to SSID '{:s}' with password {:s}".format(
-                self.ssid, self.password
+                self.creds.ssid, self.creds.password
             )
         )
+
         # initiate the connection
         self.sta_if.active(True)
-        self.sta_if.connect(self.ssid, self.password)
+        self.sta_if.connect(self.creds.ssid, self.creds.password)
 
-        attempts = 0
-        while attempts < self.MAX_CONN_ATTEMPTS:
+        attempts = 1
+        while attempts <= self.MAX_CONN_ATTEMPTS:
             if not self.sta_if.isconnected():
-                print("Connection in progress")
+                print("Connection attempt {:s}/{:s} ...".format(attempts, self.MAX_CONN_ATTEMPTS))
                 time.sleep(2)
                 attempts += 1
             else:
-                print("Connected to {:s}".format(self.ssid))
+                print("Connected to {:s}".format(self.creds.ssid))
                 self.local_ip = self.sta_if.ifconfig()[0]
-                self.write_creds(self.ssid, self.password)
                 return True
 
         print(
             "Failed to connect to {:s} with {:s}. WLAN status={:d}".format(
-                self.ssid, self.password, self.sta_if.status()
+                self.creds.ssid, self.creds.password, self.sta_if.status()
             )
         )
         # forget the credentials since they didn't work, and turn off station mode
-        self.ssid = self.password = None
-        self.http_server.saved_credentials = (None, None)
+        self.creds.remove()
         self.sta_if.active(False)
         return False
 
     def check_valid_wifi(self):
         if not self.sta_if.isconnected():
-            if self.has_creds():
+            if self.creds.load().is_valid():
                 # have credentials to connect, but not yet connected
                 # return value based on whether the connection was successful
                 return self.connect_to_wifi()
@@ -130,7 +126,7 @@ class CaptivePortal:
 
                 if self.check_valid_wifi():
                     print("Connected to WiFi!")
-                    self.http_server.set_ip(self.local_ip, self.ssid)
+                    self.http_server.set_ip(self.local_ip, self.creds.ssid)
                     self.dns_server.stop(self.poller)
                     break
 
@@ -157,30 +153,17 @@ class CaptivePortal:
         gc.collect()
 
     def try_connect_from_file(self):
-        print("Trying to load WiFi credentials from {:s}".format(self.CRED_FILE))
-        try:
-            os.stat(self.CRED_FILE)
-        except OSError as e:
-            if e.args[0] == uerrno.ENOENT:
-                print("{:s} does not exist".format(self.CRED_FILE))
-                return False
+        if self.creds.load().is_valid():
+            if self.connect_to_wifi():
+                return True
 
-        contents = open(self.CRED_FILE, "rb").read().split(b",")
-        if len(contents) == 2:
-            self.ssid, self.password = contents
-        else:
-            print("Invalid credentials file:", contents)
-            return False
-
-        if not self.connect_to_wifi():
-            print("Failed to connect with stored credentials, starting captive portal")
-            os.remove(self.CRED_FILE)
-            return False
-
-        return True
+        # WiFi Connection failed - remove credentials from disk
+        self.creds.remove()
+        return False
 
     def start(self):
         # turn off station interface to force a reconnect
         self.sta_if.active(False)
         if not self.try_connect_from_file():
             self.captive_portal()
+
