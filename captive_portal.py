@@ -107,15 +107,6 @@ class CaptivePortal:
                 print("Turned off access point")
         return False
 
-    def has_creds(self):
-        self.ssid, self.password = self.http_server.saved_credentials
-        return None not in [self.ssid, self.password]
-
-    def write_creds(self, ssid, password):
-        with open(self.CRED_FILE, "wb") as fp:
-          fp.write(b",".join([ssid, password]))
-        print("Wrote credentials to {:s}".format(self.CRED_FILE))
-
     def captive_portal(self):
         print("Starting captive portal")
         self.start_access_point()
