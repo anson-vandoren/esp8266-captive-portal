@@ -91,10 +91,8 @@ class HTTPServer(Server):
         ssid = params.get(b"ssid", None)
         password = params.get(b"password", None)
 
-        creds = Creds()
-        creds.ssid = ssid
-        creds.password = password
-        creds.write()
+        # Write out credentials
+        Creds(ssid=ssid, password=password).write()
 
         headers = (
             b"HTTP/1.1 307 Temporary Redirect\r\n"
