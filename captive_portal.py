@@ -59,7 +59,7 @@ class CaptivePortal:
         attempts = 1
         while attempts <= self.MAX_CONN_ATTEMPTS:
             if not self.sta_if.isconnected():
-                print("Connection attempt {:s}/{:s} ...".format(attempts, self.MAX_CONN_ATTEMPTS))
+                print("Connection attempt {:d}/{:d} ...".format(attempts, self.MAX_CONN_ATTEMPTS))
                 time.sleep(2)
                 attempts += 1
             else:
