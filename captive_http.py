@@ -14,6 +14,32 @@ from server import Server
 import gc
 
 
+def unquote(string):
+    """stripped down implementation of urllib.parse unquote_to_bytes"""
+
+    if not string:
+        return b''
+
+    if isinstance(string, str):
+        string = string.encode('utf-8')
+
+    # split into substrings on each escape character
+    bits = string.split(b'%')
+    if len(bits) == 1:
+        return string  # there was no escape character
+    
+    res = [bits[0]]  # everything before the first escape character
+
+    # for each escape character, get the next two digits and convert to 
+    for item in bits[1:]:
+        code = item[:2]
+        char = bytes([int(code, 16)])  # convert to utf-8-encoded byte
+        res.append(char)  # append the converted character
+        res.append(item[2:])  # append anything else that occurred before the next escape character
+    
+    return b''.join(res)
+
+
 class HTTPServer(Server):
     def __init__(self, poller, local_ip):
         super().__init__(poller, 80, socket.SOCK_STREAM, "HTTP Server")
@@ -88,8 +114,8 @@ class HTTPServer(Server):
         return ReqInfo(req_type, base_path, query_params, host)
 
     def login(self, params):
-        ssid = params.get(b"ssid", None)
-        password = params.get(b"password", None)
+        ssid = unquote(params.get(b"ssid", None))
+        password = unquote(params.get(b"password", None))
 
         # Write out credentials
         Creds(ssid=ssid, password=password).write()
