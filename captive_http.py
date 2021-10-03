@@ -220,7 +220,11 @@ class HTTPServer(Server):
         c = self.conns[id(sock)]
         if c:
             # write next 536 bytes (max) into the socket
-            bytes_written = sock.write(c.buffmv[c.write_range[0] : c.write_range[1]])
+            try:
+                bytes_written = sock.write(c.buffmv[c.write_range[0] : c.write_range[1]])
+            except OSError:
+                print('cannot write to a closed socket')
+                return
             if not bytes_written or c.write_range[1] < 536:
                 # either we wrote no bytes, or we wrote < TCP MSS of bytes
                 # so we're done with this connection
