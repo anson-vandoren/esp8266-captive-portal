@@ -22,6 +22,7 @@ def unquote(string):
 
     if isinstance(string, str):
         string = string.encode('utf-8')
+    string = string.replace(b'+', b' ')
 
     # split into substrings on each escape character
     bits = string.split(b'%')
